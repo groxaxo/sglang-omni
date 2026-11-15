@@ -186,6 +186,33 @@ class Zonos3EngineBuilder(SGLangGenerationEngineBuilder[Zonos3RequestData]):
         assert isinstance(model, Zonos3SGLangModel)
         self.model = model
 
+        # Opt-in GPTQ-Pro INT4/BF16 mixed-precision MoE for ZONOS3-Mini.
+        # Existing SGLang GDN/attention, sampling and codec are unchanged.
+        # The plugin uses native packed int32 INT4 (no BF16 unpacked copy).
+        # It must be visible on PYTHONPATH in worker processes.
+        overlay = os.environ.get("ZONOS3_GPTQPRO_OVERLAY")
+        if overlay:
+            original = os.environ.get("ZONOS3_GPTQPRO_BASE")
+            if not original:
+                raise ValueError(
+                    "ZONOS3_GPTQPRO_BASE must be the original Zyphra "
+                    "lm/zonos3_mini directory (model.pth + params.json)"
+                )
+            from examples.zonos3_mini.sglang_omni_moe import (
+                attach_sglang_omni_overlay,
+            )
+
+            report = attach_sglang_omni_overlay(
+                model,
+                manifest=overlay,
+                original_model_path=original,
+            )
+            import logging
+
+            logging.getLogger(__name__).info(
+                "SGLang-Omni ZONOS3 GPTQ-Pro packed INT4 enabled: %s", report
+            )
+
     def make_model_runner(
         self, model_worker: ModelWorker, output_processor: SGLangOutputProcessor
     ) -> Zonos3ModelRunner:
