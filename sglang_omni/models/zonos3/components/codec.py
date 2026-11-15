@@ -108,11 +108,24 @@ def load_checkpoint_state(
     checkpoint_path: Path, section: str, device: torch.device | str
 ) -> dict[str, torch.Tensor]:
     """Load one tensor section of a codec checkpoint and fold its weight norms on device."""
-    # Folding on the inference device reproduces the GPU weight-norm numerics bit for bit.
-    checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    return fold_weight_norm(
-        {name: tensor.float() for name, tensor in checkpoint[section].items()}
+    # A single Zonos3 generator.pt includes multiple large training sections.
+    # Do NOT deserialize every section directly onto CUDA: most aren't used by
+    # the inference decoder, and the temporary allocations would be kept by
+    # PyTorch's caching allocator (visible as ~many GiB "used" in nvidia-smi).
+    #
+    # CPU mmap lazily touches only the named section's storages, then the
+    # selected tensors move to CUDA as FP32. Fold weight norms on the inference
+    # device, exactly as before, to preserve the qualified numerical path.
+    checkpoint = torch.load(
+        checkpoint_path, map_location="cpu", weights_only=True, mmap=True
     )
+    source = checkpoint[section]
+    selected = {
+        name: tensor.to(device=device, dtype=torch.float32)
+        for name, tensor in source.items()
+    }
+    del source, checkpoint
+    return fold_weight_norm(selected)
 
 
 class SemanticResidualQuantizer(nn.Module):

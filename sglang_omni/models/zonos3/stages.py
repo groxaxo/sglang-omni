@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import os
 
+import torch
+
 from tokenizers import Tokenizer
 
 from sglang_omni.models.zonos3.components.codec import (
@@ -142,6 +144,27 @@ def create_vocoder_executor(
     decoder = Zonos3CodecDecoder.from_model_directory(
         snapshot_directory, resolve_concrete_device(device, gpu_id)
     )
+    # After strict checkpoint loading and BF16 casting, original FP32
+    # checkpoint temporaries have no live references. Return their cached GPU
+    # blocks *before* graph capture so the 8 GiB generator/4 GiB head load
+    # does not permanently inflate process NVML VRAM accounting.
+    if decoder.to_external_kernel.is_cuda:
+        import logging
+
+        decoder_device = decoder.to_external_kernel.device
+        cached_before = torch.cuda.memory_reserved(decoder_device)
+        live = torch.cuda.memory_allocated(decoder_device)
+        torch.cuda.empty_cache()
+        cached_after = torch.cuda.memory_reserved(decoder_device)
+        logging.getLogger(__name__).info(
+            "Zonos3 decoder CUDA memory after CPU mmap load: "
+            "allocated=%.3f GiB reserved_before=%.3f GiB "
+            "reserved_after=%.3f GiB freed_cached=%.3f GiB",
+            live / (1 << 30),
+            cached_before / (1 << 30),
+            cached_after / (1 << 30),
+            (cached_before - cached_after) / (1 << 30),
+        )
     # note (zhaochenyang20): A fresh server otherwise captures or eagerly decodes about 40 single-request trunk lengths and builds a synthesis plan per new length while serving SeedTTS EN non-streaming; capturing them first served 3.5% more requests per second on one H100 (4 ABBA pairs, streaming unchanged) for about 2.5 s more startup and 0.25 GB.
     if decoder.to_external_kernel.is_cuda:
         decoder.capture_decode_graphs()
